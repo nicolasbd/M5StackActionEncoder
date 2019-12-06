@@ -20,8 +20,65 @@
 #include "esp32-hal-log.h"
 #endif
 
-static char LOG_TAG[] = "SampleHIDDevice";
+// Encoder Vars
+#define Faces_Encoder_I2C_ADDR     0X5E
+int encoder_increment;//positive: clockwise nagtive: anti-clockwise
+int encoder_value=0;
+int last_encoder_value;
+int direction;//-1: clockwise 1: anti-clockwise
+uint8_t last_button, cur_button;
 
+boolean isModeSelector = false;
+
+typedef struct {
+  char title[30];
+  KEYMAP maps[2];
+  char buttons[2][10];
+  KEYMAP encoderMoves[2];
+  KEYMAP encoderAction[1];
+} CONFIG;
+
+
+CONFIG configurations[] = {
+  CONFIG {
+    "IDEA : RUN DEBUG",
+    { KEYMAP {0x3e42, KEY_SHIFT}, KEYMAP {0x41, KEY_CTRL} },
+    { "RE-RUN", "NEXT" },
+    { KEYMAP {0x51}, KEYMAP {0x52} },
+    KEYMAP {0x41, KEY_CTRL}
+  },
+  CONFIG {
+    "TWITTER",
+    { KEYMAP {0x17}, KEYMAP {0x0f} },
+    { "RT", "LIKE" },
+    { KEYMAP {0x0d}, KEYMAP {0x0e} },
+    KEYMAP {0x28}
+
+  }
+};
+
+int configIndex = 0;
+void GetEncoderValue(void) {
+    int temp_encoder_increment;
+
+    Wire.requestFrom(Faces_Encoder_I2C_ADDR, 3);
+    if(Wire.available()){
+       temp_encoder_increment = Wire.read();
+       cur_button = Wire.read();
+    }
+    if(temp_encoder_increment > 127){//anti-clockwise
+        direction = -1;
+        encoder_increment = 256 - temp_encoder_increment;
+    } else if (temp_encoder_increment != 0) {
+        direction = 1;
+        encoder_increment = temp_encoder_increment;
+    } else {
+      direction = 0;
+    }
+    
+}
+
+static char LOG_TAG[] = "SampleHIDDevice";
 static BLEHIDDevice* hid;
 BLECharacteristic* input;
 BLECharacteristic* output;
@@ -113,6 +170,11 @@ class MyTask : public Task {
 
 std::vector<MyTask *> tasks;
 
+void resetScreen() {
+  M5.Lcd.clear(BLACK);
+  DisplayConnectionText();
+}
+
 void DisplayConnectionText() {
   int yStart = 0;
   int height = 50;
@@ -131,11 +193,24 @@ void DisplayStatusText(const char *text) {
 }
 
 void DisplayGuide() {
+  
+  
   int yStart = 200;
-  M5.Lcd.setCursor(0, yStart);
-  M5.Lcd.printf("[HELLO]");
-  M5.Lcd.setCursor(90, yStart);
-  M5.Lcd.printf("[CTRL+ALT+DEL]");
+
+  CONFIG c = configurations[configIndex];
+  M5.Lcd.setCursor(0, yStart - 40);
+  M5.Lcd.print(c.title);
+  if (isModeSelector) {
+    M5.Lcd.setCursor(120, yStart);
+    M5.Lcd.printf("SEL");
+  } 
+
+  M5.Lcd.setCursor(40, yStart);
+  M5.Lcd.printf(c.buttons[0]);
+  M5.Lcd.setCursor(220, yStart);
+  M5.Lcd.printf(c.buttons[1]);
+  M5.Lcd.setCursor(120, yStart);
+
 }
 
 class MyCallbacks : public BLEServerCallbacks {
@@ -291,18 +366,19 @@ void StartBLEServer(void)
 
 void setup() {
   M5.begin();                   // M5STACK INITIALIZE
-  
+  Wire.begin();
   esp_log_level_set("*", ESP_LOG_DEBUG);        // set all components to ERROR level
   //esp_log_level_set("wifi", ESP_LOG_WARN);      // enable WARN logs from WiFi stack
-  log_e("HELLO_ERR");
+  //log_e("HELLO_ERR");
 
   Serial.begin(115200);         // SERIAL
+  dacWrite (25,0);
   
   M5.Lcd.setBrightness(200);    // BRIGHTNESS = MAX 255
   M5.Lcd.fillScreen(BLACK);     // CLEAR SCREEN
   M5.Lcd.setTextColor(WHITE);
   M5.Lcd.setTextSize(2);
-  M5.Lcd.setRotation(0);        // SCREEN ROTATION = 0
+  //M5.Lcd.setRotation(0);        // SCREEN ROTATION = 0
 
   DisplayStatusText("Initializing...");
   DisplayConnectionText();
@@ -313,25 +389,93 @@ void setup() {
   DisplayStatusText("Initialized.");
 }
 
+int nConfigs = (sizeof (configurations) / sizeof (CONFIG));
+int lastConfigIndex = configIndex;
 void loop() {
-  // put your main code here, to run repeatedly:
-  if(isConnected && M5.BtnA.wasPressed()) {
-    MyTask *task = new MyTask("Hello From M5Stack!\n");
-    task->start();
-    tasks.push_back(task);
+    
+  if( M5.BtnB.wasReleased()) {
+    isModeSelector = !isModeSelector;
+    M5.update();
   }
 
-  if(isConnected && M5.BtnB.wasPressed()) {
-    KEYMAP payload[1];
-    payload[0] = {0x4c, KEY_CTRL | KEY_ALT}; // CTRL+ALT+DEL !!!!
-    MyTask *task = new MyTask(payload, 1);
-    task->start();
-    tasks.push_back(task);
+  GetEncoderValue();
+  if(isModeSelector) {
+    if (direction != 0) {
+      if (direction == -1) {
+          configIndex -= 1;
+      } else if (direction == 1) {
+          configIndex += 1;
+      }
+
+      if (configIndex < 0) {
+        configIndex = nConfigs - 1;
+      } else if (configIndex > nConfigs -1) {
+        configIndex = 0;
+      }
+
+      resetScreen();
+      M5.update();
+    }
+
+
+  } else {
+    if (isConnected) {
+      
+      CONFIG conf = configurations[configIndex];
+      KEYMAP payload[1];
+      if( M5.BtnA.wasReleased()) {
+          payload[0] = conf.maps[0];
+          MyTask *task2 = new MyTask(payload, 1);
+          task2->start();
+          tasks.push_back(task2);
+          delay(300);
+      }
+
+      if (M5.BtnC.wasReleased()) {
+        payload[0] = conf.maps[1];
+        MyTask *task3 = new MyTask(payload, 1);
+        task3->start();
+        tasks.push_back(task3);
+        delay(300);
+      }    
+      
+      if(last_button != cur_button) {
+          
+        if (cur_button) {
+            payload[0] = conf.encoderAction[0];
+            MyTask *taskBtn = new MyTask(payload, 1);
+            taskBtn->start();
+            tasks.push_back(taskBtn);
+        }
+        
+        last_button = cur_button;
+        delay(300);
+      }
+
+
+      if (direction == 1) {
+          encoder_value += encoder_increment;
+          payload[0] = conf.encoderMoves[0]; 
+          MyTask *downTask = new MyTask(payload, 1);
+          downTask->start();
+          tasks.push_back(downTask);
+          delay(250);
+      } else if (direction == -1){
+          encoder_value -= encoder_increment;
+          payload[0] = conf.encoderMoves[1]; 
+          MyTask *upTask = new MyTask(payload, 1);
+          upTask->start();
+          tasks.push_back(upTask);
+          delay(250);
+      }  
+    
+    }
+      
+    
   }
-  
-  if (M5.BtnC.wasPressed()) {
-  }
+
+  DisplayGuide();
   M5.update();
+  
+
 }
-
-
